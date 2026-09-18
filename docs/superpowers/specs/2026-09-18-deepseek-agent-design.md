@@ -175,7 +175,6 @@ AgentOrchestrator.run(question, sessionId, userId, ip)
 | 54 | `第二食堂` | `食堂` | 同上 |
 
 > ⚠️ **坐标不得凭空编造**。M1 第一项数据任务就是核定这 5 个坐标；核定不出来的地点不写入，且 §7 中依赖它的场景必须替换为已有坐标的地点（`学校正门` id=37、`图书馆` id=38 等 12 行已存在）。
-> **联动规则**：§7 场景 1 与 §6 的 `PlaceResolverIntegrationTest` 断言必须**同时**随实际写入的种子集移动 —— 某地点核不出坐标时，既不写入种子，也要把场景 1 换成可解析的校园地点，并让 it 断言改为「对**实际写入的种子集**逐个断言可解析且坐标落在大庆合理范围内」，**不要硬编码 id 50/53**。
 > **因此 `大庆站` 等校外地点不进本设计**（无坐标来源，且会污染 `/campus` 列表）。
 
 **(2) 新增 `PlaceResolver`（`com.freshman.agent.PlaceResolver`）**
@@ -217,7 +216,7 @@ public interface AgentTool {
 
 `ToolRegistry`：
 
-- 构造注入 `List<AgentTool>`；**`UtilityToolsConfig` 用 `@Configuration` + 两个返回 `AgentTool` 的 `@Bean` 方法暴露**（而不是一个类实现两次接口），保证被 `List<AgentTool>` 正确收集（类名与 §8.1 的 `tool/UtilityToolsConfig.java` 一致；其测试类仍叫 `UtilityToolsTest`）
+- 构造注入 `List<AgentTool>`；**`UtilityTools` 用 `@Configuration` + 两个返回 `AgentTool` 的 `@Bean` 方法暴露**（而不是一个类实现两次接口），保证被 `List<AgentTool>` 正确收集
 - 启动校验：**重名检测**（冲突启动失败）、`name` 匹配 `^[a-z_]{3,40}$`、`parameters()` 含 `type/properties`
 - 生成 OpenAI 兼容数组 `[{"type":"function","function":{"name","description","parameters"}}]`
 - `get(name)` 未命中返回 `Optional.empty()`
@@ -251,9 +250,8 @@ AgentAnswer run(String question, String sessionId, Long userId, String ip);
 
 **决定（v3 钉死）**：
 
-1. **新增独立 DTO `com.freshman.agent.dto.AgentChatResponse`**，字段 = 现有响应字段（`question/answer/confidence/isUnknown/relatedQuestions/category`，**JSON 键名不变**，前端旧逻辑继续可用）+ 新增 `steps[]/stopReason/turnId/degraded` + **`citations[]`**（结构化来源 `{index, title, urlPath, snippet, sourceType, sourceId}`，供 §3.7 的来源列表渲染；**不复用 trace 的 `resultDigest` 字符串**）
-2. `POST /api/deepseek/chat` 返回类型由 `Result<AiQaService.ChatResponse>` 改为 `Result<AgentChatResponse>`
-   - ⚠️ **降级/配置引导路径的映射必须显式实现**：`DeepSeekChatService.chat()` 与 `configGuideResponse(question)` **仍返回 `AiQaService.ChatResponse`** —— 注意它**并非"只被子系统 A 使用"**（降级路径会复用它），`AiQaService.java` 本身不改。编排层必须把它**逐字段映射**为 `AgentChatResponse`：`question/answer/confidence/category/isUnknown/relatedQuestions` 直搬，`steps=[]`、`citations=[]`、`turnId=本轮UUID`、`stopReason="degraded"`、`degraded=true`。此即 A9 / DoD 的「断 key 降级」路径，由 `AgentOrchestratorTest` 场景⑨覆盖
+1. **新增独立 DTO `com.freshman.agent.dto.AgentChatResponse`**，字段 = 现有响应字段（`question/answer/confidence/isUnknown/relatedQuestions/category`，**JSON 键名不变**，前端旧逻辑继续可用）+ 新增 `steps[]/stopReason/turnId/degraded`
+2. `POST /api/deepseek/chat` 返回类型由 `Result<AiQaService.ChatResponse>` 改为 `Result<AgentChatResponse>` —— **`AiQaService.ChatResponse` 完全不动**（它只被子系统 A 使用），两条产品线彻底解耦
 3. **不改 `ai_chat_history` 表结构**；最终答案由 `DeepSeekChatService.saveHistory(...)` 按现有行为落库（**需把 `saveHistory` 的可见性由 `private` 改为 `public`**，`recentSuccessHistory` 同理由编排层复用），§8.2 已列出该变更
 4. Agent 身份由新表承载：
 
@@ -341,16 +339,7 @@ app:
 ## 6. 测试计划（三层）
 
 > **测试基建从零建立**；**必须补 surefire 配置**（`pom.xml` 无任何 surefire 配置，仅 `@Tag` 不排除任何测试）：
-> `<configuration><excludedGroups>${test.excludedGroups}</excludedGroups></configuration>`
-> 并定义默认属性 `<test.excludedGroups>eval,it</test.excludedGroups>`。**必须用属性占位符而不是字面量** —— 否则 POM 配置会覆盖命令行 `-D`，`it`/`eval` 层将无法手动执行。三层命令：
->
-> | 层 | 命令 |
-> |---|---|
-> | 单元（默认） | `mvn test` |
-> | 集成（it） | `mvn test -Dtest.excludedGroups=eval` |
-> | 全部（含付费 eval） | `mvn test -Dtest.excludedGroups=` |
->
-> （**仅插件配置，不新增依赖，A10 成立**）
+> `<configuration><excludedGroups>eval,it</excludedGroups></configuration>`（**仅插件配置，不新增依赖，A10 成立**）
 
 | 层 | Tag | 依赖 | `mvn test` 是否执行 |
 |---|---|---|---|
@@ -366,7 +355,7 @@ app:
 | `PlanRouteToolTest` | 单元 | 解析成功走真实路线调用、`place_not_found`、`place_ambiguous`、底层三级容灾 |
 | `UtilityToolsTest` | 单元 | **`get_current_time`** + `calculate`（合法表达式、含字母/分号/脚本被拒） |
 | `SearchKnowledgeToolTest` | 单元 | `top_k` 越界钳制、`hasQualifiedMaterial=false` → 可读提示、来源字段映射自 `ScoredChunk` |
-| `AgentOrchestratorTest` | 单元 | **脚本化重放 9 场景**：8 个边界情况 —— ①单工具 ②并行双工具 ③幻觉工具名自愈 ④schema 违规 ⑤`arguments` 非法 JSON ⑥`reasoning_content` 不污染 ⑦maxSteps + token 预算 ⑧结果 >4000 字截断；⑨**降级映射**（`chat()` 的 `AiQaService.ChatResponse` → `AgentChatResponse`，断言 `degraded=true`/`stopReason=degraded`/`steps=[]`） |
+| `AgentOrchestratorTest` | 单元 | **脚本化重放 8 场景**：①单工具 ②并行双工具 ③幻觉工具名自愈 ④schema 违规 ⑤`arguments` 非法 JSON ⑥`reasoning_content` 不污染 ⑦maxSteps + token 预算 ⑧结果 >4000 字截断 |
 | `PlaceResolverIntegrationTest` | **it** | 真实 MySQL：**§7 全部地点名可解析**、坐标非空且落在大庆合理经纬度范围内（约束"不得编造坐标"） |
 | `QueryCampusDataIntegrationTest` | **it** | 真实 MySQL：白名单内键的**注入尝试返回 0 行**（而非 `invalid_arguments`） |
 | `AgentDemoScenariosTest` | **eval** | §7 的 5 个场景真实调用 |
@@ -410,8 +399,7 @@ com.freshman.agent.llm
 com.freshman.entity.AgentToolCallLog.java
 com.freshman.mapper.AgentToolCallLogMapper.java  必须在 com.freshman.mapper
 src/test/java/com/freshman/agent/                 §6 的 7 个单元测试类 + ScriptedDeepSeekClient
-src/test/java/com/freshman/agent/it/              §6 的 2 个 it 测试类（真实 MySQL）
-src/test/java/com/freshman/agent/eval/            §6 的 AgentDemoScenariosTest（@Tag("eval")，付费）
+src/test/java/com/freshman/agent/it/              §6 的 2 个 it 测试类
 docs/sql/2026-09-18_agent_schema.sql             建表 + 5 行 campus_building 固定 id 幂等 INSERT
 ```
 
@@ -424,7 +412,7 @@ docs/sql/2026-09-18_agent_schema.sql             建表 + 5 行 campus_building 
 | `BaiduNavigationService.java` | **新增 6 参重载**（带 `fromName`），原 5 参方法不动 |
 | `templates/deepseek-chat.html` | 轨迹卡片、模式标识、来源列表、地点候选快捷回复 |
 | `src/main/resources/application.yml` | 新增 `app.ai.deepseek.agent.*`；`apiKey` 改环境变量兜底 |
-| `pom.xml` | **仅**新增 surefire `<excludedGroups>${test.excludedGroups}</excludedGroups>` + 默认属性值 `eval,it` |
+| `pom.xml` | **仅**新增 surefire `<excludedGroups>eval,it</excludedGroups>` |
 
 > **`freshman_orientation.sql` 不改**：该脚本以 `DROP TABLE IF EXISTS campus_building` 开头，是**重建脚本**，且项目没有 `data.sql`/`schema.sql`/启动初始化器。因此 5 行种子数据以**固定 id + `ON DUPLICATE KEY UPDATE`** 的幂等形式写进 `docs/sql/2026-09-18_agent_schema.sql`，可直接施加到**已存在的开发库**（`campus_building` 当前 `AUTO_INCREMENT=49`，故用 id 50–54）。
 
