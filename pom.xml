@@ -22,6 +22,7 @@
         <java.version>17</java.version>
         <mybatis-plus.version>3.5.5</mybatis-plus.version>
         <druid.version>1.2.22</druid.version>
+        <test.excludedGroups>eval,it</test.excludedGroups>
     </properties>
 
     <dependencies>
@@ -130,6 +131,31 @@
                             <artifactId>lombok</artifactId>
                         </exclude>
                     </excludes>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- 用属性占位符而非字面量：字面量会被 POM 覆盖 -D，导致 it/eval 层无法手动执行 -->
+                    <excludedGroups>${test.excludedGroups}</excludedGroups>
+                    <!-- surefire 默认只发现 *Test/*Tests/*TestCase，**不包含 *IT**。
+                         这里显式列出默认值并补上 **/*IT.java，否则 @Tag("it") 的 *IT 类
+                         在任何层都不会被执行（静默漏跑）。 -->
+                    <includes>
+                        <include>**/Test*.java</include>
+                        <include>**/*Test.java</include>
+                        <include>**/*Tests.java</include>
+                        <include>**/*TestCase.java</include>
+                        <include>**/*IT.java</include>
+                    </includes>
+                    <!-- 本环境必须：Mockito 的 inline mock maker 需要 self-attach ByteBuddy agent，
+                         不允许时 Mockito 初始化失败，会让**每一个 @SpringBootTest 测试直接报错**
+                         （即使该测试完全没用 Mockito —— Spring 测试基础设施会强制初始化它）。
+                         实测：缺这两个参数时 SchemaApplyIT 报 "Could not initialize plugin:
+                         interface org.mockito.plugins.MockMaker"。 -->
+                    <argLine>-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading</argLine>
                 </configuration>
             </plugin>
         </plugins>

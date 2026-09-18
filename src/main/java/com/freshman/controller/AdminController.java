@@ -1,7 +1,10 @@
 package com.freshman.controller;
 
+import com.freshman.common.Result;
 import com.freshman.entity.*;
 import com.freshman.mapper.*;
+import com.freshman.rag.KnowledgeIndexer;
+import com.freshman.rag.dto.IndexReport;
 import com.freshman.service.UserService;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
@@ -42,6 +45,12 @@ public class AdminController {
     private final ActivityMapper activityMapper;
     private final ForumPostMapper postMapper;
 
+    /** RAG 索引器：支撑 /admin/ai/reindex 知识库索引重建 */
+    private final KnowledgeIndexer knowledgeIndexer;
+
+    /** RAG 评估执行器：支撑 /admin/ai/eval */
+    private final com.freshman.rag.RagEvalRunner ragEvalRunner;
+
     /**
      * 构造器注入所有Mapper和Service
      */
@@ -52,7 +61,9 @@ public class AdminController {
                           MajorMapper majorMapper, TeacherMapper teacherMapper,
                           RegistrationStepMapper stepMapper, DormitoryMapper dormitoryMapper,
                           CafeteriaMapper cafeteriaMapper, ClubMapper clubMapper,
-                          ActivityMapper activityMapper, ForumPostMapper postMapper) {
+                          ActivityMapper activityMapper, ForumPostMapper postMapper,
+                          KnowledgeIndexer knowledgeIndexer,
+                          com.freshman.rag.RagEvalRunner ragEvalRunner) {
         this.userService = userService;
         this.userMapper = userMapper;
         this.roleMapper = roleMapper;
@@ -68,6 +79,38 @@ public class AdminController {
         this.clubMapper = clubMapper;
         this.activityMapper = activityMapper;
         this.postMapper = postMapper;
+        this.knowledgeIndexer = knowledgeIndexer;
+        this.ragEvalRunner = ragEvalRunner;
+    }
+
+    /**
+     * 跑 RAG 评估集并返回 Markdown 报告
+     *
+     * 权限：仅 ADMIN（/admin/** 已被 SecurityConfig 限定）
+     * 说明：必须加 @ResponseBody —— AdminController 是 @Controller（返回视图名），
+     *       不加会去找不存在的模板而报错。
+     *
+     * @param generation true 时额外调用真实 LLM 判定负样本的拒答层（有成本，默认关闭）
+     */
+    @GetMapping(value = "/ai/eval", produces = "text/markdown;charset=UTF-8")
+    @ResponseBody
+    public String eval(@RequestParam(defaultValue = "false") boolean generation) {
+        return com.freshman.rag.RagEvalRunner.toMarkdown(ragEvalRunner.evaluate(generation));
+    }
+
+    /**
+     * 触发 RAG 知识库索引重建
+     *
+     * 权限：仅 ADMIN —— /admin/** 已被 SecurityConfig 限定为 hasRole("ADMIN")，
+     *       因此本端点无需额外配置即可受保护。
+     *
+     * @param force true 时忽略 content_hash 强制重新切分与向量化（默认 false，走增量）
+     * @return 重建报告（文档数/chunk 数/向量化数/跳过数/失败数/耗时）
+     */
+    @PostMapping("/ai/reindex")
+    @ResponseBody
+    public Result<IndexReport> reindex(@RequestParam(defaultValue = "false") boolean force) {
+        return Result.success(knowledgeIndexer.rebuildAll(force));
     }
 
     /**
