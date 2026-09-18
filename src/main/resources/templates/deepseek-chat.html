@@ -245,11 +245,15 @@
                     <div class="bot-avatar">🐳</div>
                     <div class="header-info">
                         <h6>🐳 DeepSeek 助手</h6>
-                        <small>DeepSeek 大模型驱动 · 知识库检索增强（RAG）</small>
+                        <small id="mode-desc">工具调用型 Agent · 按需调用检索/校园数据/路线等只读工具</small>
                     </div>
                     <div class="ms-auto d-flex align-items-center gap-2">
-                        <span class="badge bg-light text-primary">
+                        <span class="badge bg-light text-primary" id="mode-badge" title="当前问答模式">
                             <i class="bi bi-cpu"></i>
+                            <span id="mode-text">模式检测中…</span>
+                        </span>
+                        <span class="badge bg-light text-primary">
+                            <i class="bi bi-hdd-network"></i>
                             <span id="model-name">deepseek-v4-flash</span>
                         </span>
                         <button class="btn btn-sm btn-light" onclick="clearConversation()"
@@ -261,9 +265,10 @@
 
                 <!-- 配置提示横幅（未配置apiKey时显示） -->
                 <div class="config-banner hidden" id="configBanner">
-                    ⚠️ DeepSeek API Key 尚未配置：请到 <b>application.yml → app.ai.deepseek.apiKey</b> 填入你的 Key
-                    （获取地址：<a href="https://platform.deepseek.com" target="_blank">platform.deepseek.com</a>），
-                    填好后重启应用。当前发送的问题会返回配置引导。
+                    ⚠️ DeepSeek API Key 尚未配置：请设置环境变量
+                    <b>DEEPSEEK_API_KEY</b> 后重启应用
+                    （获取地址：<a href="https://platform.deepseek.com" target="_blank">platform.deepseek.com</a>）。
+                    当前发送的问题会返回配置引导，不会报错。
                 </div>
 
                 <!-- 消息列表 -->
@@ -336,15 +341,20 @@
     <th:block th:replace="~{fragments/common :: footer}"></th:block>
     <th:block th:replace="~{fragments/common :: scripts}"></th:block>
 
-    <script>
+    <script th:inline="javascript">
         // ========== DeepSeek 聊天客户端逻辑 ==========
 
         const chatMessages = document.getElementById('chatMessages');
         const questionInput = document.getElementById('questionInput');
         const sendBtn = document.getElementById('sendBtn');
 
+        // 当前登录用户名（服务端注入）。localStorage 按浏览器隔离而非按账号，
+        // key 不带用户名时，同一浏览器换账号会沿用上一个账号的 sessionId，
+        // 从而通过 /api/deepseek/history 读到别人的问答。
+        const CURRENT_USER = /*[[${currentUser}]]*/ '';
+
         // 会话ID持久化：存 localStorage，跳转页面/刷新后返回仍可恢复上下文
-        const SESSION_KEY = 'deepseek_session_id';
+        const SESSION_KEY = 'deepseek_session_id::' + CURRENT_USER;
         let sessionId = localStorage.getItem(SESSION_KEY);
         if (!sessionId) {
             sessionId = generateUUID();
@@ -360,12 +370,27 @@
             });
         }
 
-        // 查询配置状态：未配置时显示提示横幅
+        // 查询配置状态：未配置时显示提示横幅；同时显示当前实际生效的问答模式
         fetch('/api/deepseek/status')
             .then(r => r.json())
             .then(res => {
-                if (res.code === 200 && res.data && !res.data.configured) {
+                if (res.code !== 200 || !res.data) return;
+                if (!res.data.configured) {
                     document.getElementById('configBanner').classList.remove('hidden');
+                }
+                const badge = document.getElementById('mode-badge');
+                const text = document.getElementById('mode-text');
+                const desc = document.getElementById('mode-desc');
+                if (res.data.agentEnabled) {
+                    text.textContent = 'Agent 模式 · ' + (res.data.toolCount || 0) + ' 个工具';
+                    badge.title = '已注册工具：' + (res.data.tools || []).join('、');
+                    desc.textContent = '工具调用型 Agent · 按需调用'
+                        + (res.data.tools || []).join(' / ') + ' 等只读工具';
+                } else {
+                    text.textContent = '基础模式（Agent 已关闭）';
+                    badge.classList.remove('text-primary');
+                    badge.classList.add('text-secondary');
+                    desc.textContent = 'DeepSeek 大模型直答 · Agent 工具调用已在配置中关闭';
                 }
             }).catch(() => {});
 
@@ -416,10 +441,18 @@
                 if (result.code === 200 && result.data) {
                     const data = result.data;
                     let meta = '<span class="badge bg-primary me-1">DeepSeek</span>';
+                    // Agent 模式标识：有工具调用轨迹即为 Agent 模式
+                    if (data.steps && data.steps.length > 0) {
+                        meta += '<span class="badge bg-success me-1">Agent · '
+                                + data.steps.length + ' 次工具调用</span>';
+                    }
+                    if (data.degraded) {
+                        meta += '<span class="badge bg-secondary me-1">未启用工具（降级）</span>';
+                    }
                     if (data.isUnknown) {
                         meta = '<span class="badge bg-warning">需要配置或异常</span>';
                     }
-                    appendMessage('bot', data.answer, meta, data.isUnknown);
+                    appendMessage('bot', data.answer, meta, data.isUnknown, data.steps, data.citations);
                 } else {
                     appendMessage('bot', '抱歉，DeepSeek 服务暂时不可用，请稍后再试。\n\n错误信息：' + (result.message || '未知错误'),
                         '<span class="badge bg-danger">服务异常</span>', true);
@@ -440,24 +473,72 @@
         }
 
         // 添加消息到聊天区域
-        function appendMessage(type, content, meta, isUnknown) {
+        // appendMessage(type, content, meta, isUnknown, steps, citations)
+        // steps：Agent 工具调用轨迹；citations：引用来源（均可选）
+        function appendMessage(type, content, meta, isUnknown, steps, citations) {
             const msgDiv = document.createElement('div');
             msgDiv.className = 'message ' + type;
 
             const avatarIcon = type === 'user' ? '👤' : '🐳';
 
             let bubbleClass = 'msg-bubble';
-            if (isUnknown) bubbleClass += ' border-warning';
+            let bubbleStyle = '';
+            if (isUnknown) {
+                bubbleClass += ' border-warning';
+                bubbleStyle = 'background:#fff8e1;';
+            }
 
             msgDiv.innerHTML = `
                 <div class="msg-avatar">${avatarIcon}</div>
-                <div>
-                    <div class="${bubbleClass}">${escapeHtml(content)}</div>
+                <div style="min-width:0;max-width:100%;">
+                    <div class="${bubbleClass}" style="${bubbleStyle}">${escapeHtml(content)}</div>
+                    ${buildTrace(steps)}
+                    ${buildCitations(citations)}
                     ${meta ? `<div class="msg-meta">${meta}</div>` : ''}
                 </div>
             `;
             chatMessages.appendChild(msgDiv);
             return msgDiv;
+        }
+
+        // 工具调用轨迹卡片（Agent 的"证据"）：每步一行，失败的步骤标红
+        function buildTrace(steps) {
+            if (!steps || steps.length === 0) return '';
+            const rows = steps.map((s, i) => {
+                const bad = s.status !== 'success';
+                const color = bad ? '#dc3545' : '#198754';
+                const args = s.arguments ? escapeHtml(String(s.arguments)) : '';
+                const digest = s.resultDigest ? escapeHtml(String(s.resultDigest)) : '';
+                return `<li style="margin-bottom:6px;">
+                    <span style="color:${color};">${bad ? '✗' : '✓'}</span>
+                    <b>${escapeHtml(s.toolName || '')}</b>(${args})
+                    <span style="color:#6c757d;font-size:12px;">${s.durationMs != null ? s.durationMs + 'ms' : ''} · ${escapeHtml(s.status || '')}</span>
+                    ${digest ? `<div style="color:#6c757d;font-size:12px;margin-top:2px;">${digest}</div>` : ''}
+                </li>`;
+            }).join('');
+            return `<details style="margin-top:6px;font-size:13px;">
+                        <summary style="cursor:pointer;color:#4D6BFE;">🔧 工具调用轨迹（${steps.length}）</summary>
+                        <ol style="margin:6px 0 0 18px;padding:0;">${rows}</ol>
+                    </details>`;
+        }
+
+        // 引用来源（可点击跳转原页面）
+        function buildCitations(citations) {
+            if (!citations || citations.length === 0) return '';
+            const items = citations.map(c => {
+                const title = escapeHtml(c.title || c.sourceType || '知识库');
+                const head = c.urlPath
+                    ? `<a href="${escapeHtml(c.urlPath)}" target="_blank" rel="noopener">${title}</a>`
+                    : `<span>${title}</span>`;
+                const snippet = c.snippet
+                    ? `<div style="color:#6c757d;font-size:12px;margin-top:2px;">${escapeHtml(c.snippet)}</div>`
+                    : '';
+                return `<li style="margin-bottom:6px;">${head}${snippet}</li>`;
+            }).join('');
+            return `<details style="margin-top:6px;font-size:13px;">
+                        <summary style="cursor:pointer;color:#4D6BFE;">📚 参考来源（${citations.length}）</summary>
+                        <ol style="margin:6px 0 0 18px;padding:0;">${items}</ol>
+                    </details>`;
         }
 
         // 显示打字动画指示器

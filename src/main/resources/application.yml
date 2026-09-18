@@ -91,6 +91,37 @@ app:
       synonym-expansion: true
 
     # ==========================================
+    # RAG 检索增强（AI 问答 RAG 化）
+    # 全部参数外部化；非法值会在启动期直接失败并指明是哪个配置项
+    # 向量存 kb_chunk.embedding（JSON 数组文本 —— MySQL 5.6 无 JSON 列类型）
+    # ==========================================
+    rag:
+      enabled: true
+      top-k-vector: 20            # 向量召回候选数，同时是 retrieve(topK) 的钳制上限
+      top-k-keyword: 20           # 关键词召回候选数
+      top-k-final: 5              # 最终注入 prompt 的材料条数（不约束检索层）
+      min-score: 0.35             # vector 模式绝对门限（向量原始余弦）
+      keyword-min-score: 0.1     # keyword 模式绝对门限（关键词原始余弦）
+      relative-floor: 0.6         # 相对门限系数（候选原始分 >= 该系数 × top1 原始分）
+      rrf-k: 60                   # RRF 平滑常数，仅影响融合排序，不参与门限
+      max-per-document: 2         # 同一文档最多保留的 chunk 数
+      chunk:
+        size: 400                 # 单块目标字数上限
+        overlap: 60               # 相邻块重叠字数
+        min-size: 30              # 小于该长度的块并入相邻块
+      embedding:
+        provider: qwen         # 可选项: qwen / deepseek / glm / moonshot / openai / custom
+        apiKey: "${DASHSCOPE_API_KEY:}"
+        # ⚠️ embedding 必须用 embeddings 端点 + embedding 模型，不能用 chat 的
+        #    （chat 端点期待 messages 字段，收到 embedding 的 input 会直接 400）
+        apiUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+        model: "text-embedding-v3"
+        dimensions: 1024
+        batch-size: 25            # 百炼单次请求上限 25
+        connect-timeout: 10000
+        read-timeout: 30000
+
+    # ==========================================
     # 大模型API扩展配置（可选，默认关闭）
     # 支持 阿里Qwen / DeepSeek / 智谱GLM / Moonshot 等 OpenAI兼容API
     # 启用方式：将 enabled 设为 true，填入对应的 api-key 即可
@@ -102,7 +133,7 @@ app:
 
       # ---------- 当前使用的模型 ----------
       provider: qwen         # 可选项: qwen / deepseek / glm / moonshot / openai / custom
-      apiKey: "sk-ws-H.EDHRMRL.KP5U.MEUCIQDX-HibgBxNyHwNYzrAbYCaTStnBmrsALDrydp8gUXDJwIgCPjx6U8itiD7q_AMfCVTDuO3uVHJl502A70CLEwf1FA"
+      apiKey: "${DASHSCOPE_API_KEY:}"
       apiUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
       model: "qwen-plus"    # 千问Plus（已验证可用）
       timeout: 30000         # 请求超时(毫秒)
@@ -117,84 +148,24 @@ app:
     # ==========================================
     deepseek:
       enabled: true            # 是否启用 DeepSeek 问答
-      apiKey: ""               # ← 在这里粘贴你的 DeepSeek API Key（sk-开头）
+      apiKey: "${DEEPSEEK_API_KEY:}"   # 用环境变量注入，禁止明文进仓库
       apiUrl: "https://api.deepseek.com/v1/chat/completions"
       model: "deepseek-v4-flash"   # deepseek-v4-flash=主力模型(快+便宜) / deepseek-v4-pro=推理加强(约3倍价格)
                                    # 注意：deepseek-chat / deepseek-reasoner 已于 2026-07-24 下线，调用会直接报错
       useRag: false            # 是否启用RAG(检索本地知识库增强回答)。false=纯大模型自由回答（不依赖ai_knowledge表）
                                # true=先从知识库检索Top3材料注入提示词，DeepSeek基于材料回答（学校信息更准确）
       timeout: 30000           # 请求超时(毫秒)
-#      maxTokens: 800           # 最大输出token数
+      maxTokens: 0             # 最大输出token数；0 = 不限制（请求不传该参数，由模型上限决定，V4最高384K）
+                               # 需要控制输出长度/费用时改为具体数值，如 800
+
+      # ---------- Agent（工具调用）配置 ----------
+      # enabled=false 时 /deepseek-chat 行为与改造前完全一致（可回退）
+      agent:
+        enabled: true
+        max-steps: 5                  # 循环步数上限，防模型陷入工具循环烧 token
+        token-budget: 30000           # 单次提问累计 token 预算，超限即停止并返回已有结果
+        tool-result-max-chars: 4000   # 单个工具结果回填上限，超出截断（防 token 爆炸）
+        history-rounds: 3             # 携带的历史轮数
+        trace-enabled: true           # 是否记录工具调用轨迹（agent_tool_call_log）
 #      temperature: 0.7         # 随机性(0-2)，越低越确定
 
-      # ==========================================
-      # 【免费API获取指南】（2026年7月更新）
-      # ==========================================
-      #
-      # ① 阿里云百炼 - 通义千问 Qwen（推荐！国内最稳）
-      #    免费额度：新用户100万tokens/模型，有效期90天
-      #    注册：https://bailian.console.aliyun.com
-      #    获取API-Key：控制台 → API-KEY管理 → 创建新的API-KEY
-      #    ⚠️ qwen-turbo 已于 2026.7.13 下线，请使用以下替代模型：
-      #    模型选择（按需选一个）：
-      #      model: "qwen3-turbo"      ← 推荐！极速低价，0.3元/百万token
-      #      model: "qwen-plus"        ← 效果/成本均衡
-      #      model: "qwen-flash"       ← 超快超省，适合简单问答
-      #      model: "qwen-max"         ← 最强能力，适合复杂任务
-      #    配置示例：
-      #      enabled: true
-      #      provider: qwen
-      #      api-key: "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-      #      api-url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-      #      model: "qwen3-turbo"
-      #
-      # ② DeepSeek（最强国产推理能力）
-      #    免费额度：注册赠送10元额度，够用很久
-      #    注册：https://platform.deepseek.com
-      #    获取API-Key：控制台 → API Keys → 创建
-      #    配置示例：
-      #      enabled: true
-      #      provider: deepseek
-      #      api-key: "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-      #      api-url: "https://api.deepseek.com/v1/chat/completions"
-      #      model: "deepseek-chat"
-      #
-      # ③ 智谱AI - GLM-4-Flash（完全免费！）
-      #    免费额度：GLM-4-Flash 模型完全免费，无限制
-      #    注册：https://open.bigmodel.cn
-      #    获取API-Key：控制台 → API Keys → 创建
-      #    配置示例：
-      #      enabled: true
-      #      provider: glm
-      #      api-key: "xxxxxxxxxxxxxxxxxxxxxxxx.xxxxxxxx"
-      #      api-url: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-      #      model: "glm-4-flash"       ← 完全免费！
-      #
-      # ④ Moonshot - Kimi
-      #    免费额度：注册赠送15元额度
-      #    注册：https://platform.moonshot.cn
-      #    获取API-Key：控制台 → API Keys → 创建
-      #    配置示例：
-      #      enabled: true
-      #      provider: moonshot
-      #      api-key: "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-      #      api-url: "https://api.moonshot.cn/v1/chat/completions"
-      #      model: "moonshot-v1-8k"
-      #
-      # ⑤ 零一万物 - Yi
-      #    免费额度：注册赠送额度
-      #    注册：https://platform.lingyiwanwu.com
-      #    配置示例：
-      #      enabled: true
-      #      provider: yi
-      #      api-key: "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-      #      api-url: "https://api.lingyiwanwu.com/v1/chat/completions"
-      #      model: "yi-large"
-      #
-      # ⑥ OpenAI / 其他兼容API
-      #    配置示例：
-      #      enabled: true
-      #      provider: openai
-      #      api-key: "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-      #      api-url: "https://api.openai.com/v1/chat/completions"
-      #      model: "gpt-3.5-turbo"
