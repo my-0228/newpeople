@@ -70,6 +70,22 @@ public class BaiduNavigationService {
     public RouteResult getWalkingRoute(double fromLat, double fromLng,
                                         double toLat, double toLng,
                                         String toName) {
+        // 兼容改造前的调用方（NavigationController）：起点名义上就是"我的位置"
+        return getWalkingRoute(fromLat, fromLng, "我的位置", toLat, toLng, toName);
+    }
+
+    /**
+     * 获取步行路线（可指定起点名称）
+     *
+     * 与 5 参版本的唯一区别：把自然语言指令由"从我的位置步行到X"改为"从{fromName}步行到X"，
+     * 使 Agent 的 plan_route 工具在起点不是用户当前位置时也能给出正确语义。
+     * 坐标换算、三级容灾等逻辑与原来完全一致。
+     *
+     * @param fromName 起点名称（为空时回退为"我的位置"）
+     */
+    public RouteResult getWalkingRoute(double fromLat, double fromLng, String fromName,
+                                        double toLat, double toLng,
+                                        String toName) {
         try {
             // ① 坐标转换：WGS-84（GPS 原始）→ GCJ-02（国测局火星坐标）
             //    百度接口按 GCJ-02 解释入参坐标；不转换会导致起点整体偏移数百米
@@ -79,7 +95,8 @@ public class BaiduNavigationService {
             // ② 构造自然语言请求与 URL
             //    该接口为"智能规划"型：直接接收自然语言指令，由服务端理解并生成路线
             //    终点名为空时用"目的地"兜底，保证指令语句通顺
-            String request = String.format("从我的位置步行到%s", toName.isEmpty() ? "目的地" : toName);
+            String fromLabel = (fromName == null || fromName.isBlank()) ? "我的位置" : fromName;
+            String request = String.format("从%s步行到%s", fromLabel, toName.isEmpty() ? "目的地" : toName);
             String url = String.format("%s?user_raw_request=%s&location=%.6f,%.6f",
                     DIRECTION_API,
                     java.net.URLEncoder.encode(request, "UTF-8"), // 中文指令必须 URL 编码

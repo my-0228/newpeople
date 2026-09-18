@@ -157,7 +157,7 @@ public class DeepSeekChatService {
         // OpenAI 协议按 role 组织消息；历史必须按时间正序排列，模型才能理解对话先后关系
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of("role", "system", "content", systemPrompt));  // ① 系统提示词固定放最前
-        List<AiChatHistory> history = recentSuccessHistory(sessionId, 6); // ② 最近 6 条（3 轮）成功问答
+        List<AiChatHistory> history = recentSuccessHistory(sessionId, userId, 6); // ② 最近 6 条（3 轮）成功问答（限当前用户）
         for (AiChatHistory h : history) {
             messages.add(Map.of("role", "user", "content", h.getQuestion()));
             messages.add(Map.of("role", "assistant", "content", h.getAnswer()));
@@ -278,13 +278,20 @@ public class DeepSeekChatService {
      * 再 reverse 成时间正序——既拿到"最近的 N 条"，又保证喂给模型的
      * 对话顺序与真实先后一致
      */
-    private List<AiChatHistory> recentSuccessHistory(String sessionId, int limit) {
+    private List<AiChatHistory> recentSuccessHistory(String sessionId, Long userId, int limit) {
+        // 隔离前提：无法确定用户身份时，宁可不带上下文（退化为单轮问答），
+        // 也不能把别人的历史当成"上下文"喂进提示词 —— 那是比单纯展示更严重的泄露。
+        if (userId == null) {
+            log.warn("[DeepSeek问答] 无法确定当前用户，多轮上下文按无历史处理: session={}", sessionId);
+            return List.of();
+        }
         try {
             // 等价 SQL：SELECT * FROM ai_chat_history
-            //           WHERE session_id = ? AND is_unknown = 0
+            //           WHERE user_id = ? AND session_id = ? AND is_unknown = 0
             //           ORDER BY id DESC LIMIT N
             List<AiChatHistory> list = chatHistoryMapper.selectList(
                     new LambdaQueryWrapper<AiChatHistory>()
+                            .eq(AiChatHistory::getUserId, userId)       // 条件0：必须属于当前用户（隔离）
                             .eq(AiChatHistory::getSessionId, sessionId) // 条件1：同一会话
                             .eq(AiChatHistory::getIsUnknown, 0)         // 条件2：只要成功回答
                             .orderByDesc(AiChatHistory::getId)          // 排序：按主键倒序 = 最新在前
@@ -303,15 +310,21 @@ public class DeepSeekChatService {
      * 查询逻辑与 recentSuccessHistory 一致：isUnknown=0、按 id 倒序取最近 limit 条后反转为正序
      * @return [{question, answer, createTime}]，按时间正序
      */
-    public List<Map<String, Object>> getHistory(String sessionId, int limit) {
+    public List<Map<String, Object>> getHistory(String sessionId, Long userId, int limit) {
         // 会话ID为空直接返回空列表，避免无意义的数据库查询
         if (sessionId == null || sessionId.trim().isEmpty()) {
+            return List.of();
+        }
+        // 关键：身份不明时返回空，而不是"不加 user_id 条件"（后者会把所有人的历史都吐出去）
+        if (userId == null) {
+            log.warn("[DeepSeek问答] 无法确定当前用户，拒绝返回历史记录: session={}", sessionId);
             return List.of();
         }
         List<Map<String, Object>> result = new ArrayList<>();
         try {
             List<AiChatHistory> list = chatHistoryMapper.selectList(
                     new LambdaQueryWrapper<AiChatHistory>()
+                            .eq(AiChatHistory::getUserId, userId)          // ← 隔离条件，必须存在
                             .eq(AiChatHistory::getSessionId, sessionId.trim())
                             .eq(AiChatHistory::getIsUnknown, 0)
                             .orderByDesc(AiChatHistory::getId)
