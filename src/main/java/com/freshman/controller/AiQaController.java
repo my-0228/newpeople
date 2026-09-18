@@ -7,6 +7,7 @@ import com.freshman.mapper.AiChatHistoryMapper;
 import com.freshman.service.AiQaService;
 import com.freshman.service.AiQaService.ChatRequest;
 import com.freshman.service.AiQaService.ChatResponse;
+import com.freshman.service.CurrentUserResolver;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,10 +43,13 @@ public class AiQaController {
 
     private final AiQaService aiQaService;
     private final AiChatHistoryMapper chatHistoryMapper;
+    private final CurrentUserResolver currentUserResolver;
 
-    public AiQaController(AiQaService aiQaService, AiChatHistoryMapper chatHistoryMapper) {
+    public AiQaController(AiQaService aiQaService, AiChatHistoryMapper chatHistoryMapper,
+                          CurrentUserResolver currentUserResolver) {
         this.aiQaService = aiQaService;
         this.chatHistoryMapper = chatHistoryMapper;
+        this.currentUserResolver = currentUserResolver;
     }
 
     // ==================== 页面视图 ====================
@@ -58,8 +62,11 @@ public class AiQaController {
      * @return 聊天页面模板路径
      */
     @GetMapping("/ai-chat")
-    public String chatPage(Model model) {
+    public String chatPage(Model model, Principal principal) {
         model.addAttribute("title", "AI 智能问答");
+        // 传给前端用于隔离 localStorage 里的会话ID：
+        // 同一浏览器切换账号时，若 key 不含用户名，B 会沿用 A 的 sessionId（历史上就是这样泄露的）
+        model.addAttribute("currentUser", principal == null ? "" : principal.getName());
         model.addAttribute("quickQuestions", aiQaService.getQuickQuestions());
         model.addAttribute("hotQuestions", aiQaService.getHotQuestions(10));
         model.addAttribute("categories", aiQaService.getCategories());
@@ -116,13 +123,8 @@ public class AiQaController {
             sessionId = UUID.randomUUID().toString();
         }
 
-        // 获取用户ID（已登录用户）
-        Long userId = null;
-        if (principal != null) {
-            // 从安全上下文中获取当前登录用户的ID
-            // 这里简化处理，实际项目中可通过UserService查找
-            userId = getCurrentUserId(principal);
-        }
+        // 获取用户ID（登录用户的数据库主键；解析不出则为 null）
+        Long userId = currentUserResolver.resolveId(principal);
 
         // 获取客户端IP
         String ipAddress = getClientIp(httpRequest);
@@ -225,18 +227,40 @@ public class AiQaController {
 
     /**
      * 获取指定会话的历史问答记录（前端进入页面时恢复聊天上下文）
+     *
      * GET /api/ai/history?sessionId=xxx&limit=50
+     *
+     * 安全约束（**按用户隔离，二者缺一不可**）：
+     * 1. 只返回 {@code user_id = 当前登录用户} 的记录 —— sessionId 由前端提供，**不可信**；
+     * 2. sessionId 额外用于"同一用户内按会话区分"；
+     * 3. 解析不出当前用户时**直接返回空并告警**，绝不退化为"不加 user_id 条件"
+     *    （否则会把所有人的历史都吐出去，比修复前更糟）。
      */
     @GetMapping("/api/ai/history")
     @ResponseBody
     public Result<Map<String, Object>> history(@RequestParam String sessionId,
-                                               @RequestParam(defaultValue = "50") int limit) {
+                                               @RequestParam(defaultValue = "50") int limit,
+                                               Principal principal) {
         if (limit < 1) limit = 1;
         if (limit > 200) limit = 200;
+
+        Long userId = currentUserResolver.resolveId(principal);
         List<Map<String, Object>> messages = new ArrayList<>();
+
+        if (userId == null) {
+            // 关键：身份不明时返回空，而不是"不过滤"。宁可少给，不可多给。
+            log.warn("[AI API] 无法确定当前用户，拒绝返回历史记录: session={}", sessionId);
+            Map<String, Object> empty = new LinkedHashMap<>();
+            empty.put("sessionId", sessionId);
+            empty.put("messages", messages);
+            empty.put("reason", "unauthenticated");
+            return Result.success(empty);
+        }
+
         try {
             List<AiChatHistory> list = chatHistoryMapper.selectList(
                     new LambdaQueryWrapper<AiChatHistory>()
+                            .eq(AiChatHistory::getUserId, userId)      // ← 隔离条件，必须存在
                             .eq(AiChatHistory::getSessionId, sessionId.trim())
                             .eq(AiChatHistory::getIsUnknown, 0)
                             .orderByDesc(AiChatHistory::getId)
@@ -259,18 +283,6 @@ public class AiQaController {
     }
 
     // ==================== 辅助方法 ====================
-
-    /**
-     * 获取当前登录用户的ID
-     */
-    private Long getCurrentUserId(Principal principal) {
-        // 简化实现：通过principal的name查找用户
-        // 实际项目中应注入UserService来查询
-        if (principal == null) return null;
-        // 这里返回null是合理的，因为用户ID的精确获取需要注入UserService
-        // 对于聊天历史记录，userId为null表示匿名用户，不影响功能
-        return null;
-    }
 
     /**
      * 获取客户端真实IP地址

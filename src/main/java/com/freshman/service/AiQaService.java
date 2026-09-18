@@ -39,6 +39,15 @@ public interface AiQaService {
         private Boolean isUnknown;
         private String[] relatedQuestions;
 
+        /** 引用来源（RAG 路径产出；前端渲染"参考来源"折叠块） */
+        private java.util.List<com.freshman.rag.dto.Citation> citations;
+
+        /** 是否降级回答（LLM 不可用，答案来自本地引擎） */
+        private Boolean degraded;
+
+        /** 本次问答总耗时（毫秒） */
+        private Long costMs;
+
         public String getQuestion() { return question; }
         public void setQuestion(String question) { this.question = question; }
         public String getAnswer() { return answer; }
@@ -51,6 +60,12 @@ public interface AiQaService {
         public void setIsUnknown(Boolean isUnknown) { this.isUnknown = isUnknown; }
         public String[] getRelatedQuestions() { return relatedQuestions; }
         public void setRelatedQuestions(String[] relatedQuestions) { this.relatedQuestions = relatedQuestions; }
+        public java.util.List<com.freshman.rag.dto.Citation> getCitations() { return citations; }
+        public void setCitations(java.util.List<com.freshman.rag.dto.Citation> citations) { this.citations = citations; }
+        public Boolean getDegraded() { return degraded; }
+        public void setDegraded(Boolean degraded) { this.degraded = degraded; }
+        public Long getCostMs() { return costMs; }
+        public void setCostMs(Long costMs) { this.costMs = costMs; }
     }
 
     /**
