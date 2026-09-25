@@ -31,6 +31,8 @@ import java.util.Map;
  *                    由模型依据自身通用知识自由回答，不依赖本地知识库。
  * 多轮上下文：每次调用前从 ai_chat_history 按 sessionId 取最近几轮成功问答，
  * 以 messages 数组（user/assistant 交替）形式一并发给模型，实现连续对话。
+ * 落库：chat() 内部自行保存历史；Agent 模式（走 AgentOrchestrator，不经 chat()）
+ * 由控制层调用 {@link #recordHistory} 补写，否则前端刷新时历史恒为空。
  * 这与通用 AiQaService 的区别：本服务不内置 Qwen/GLM 等多供应商切换，
  * 专门对接 DeepSeek，作为独立页面（/deepseek-chat）提供服务。
  *
@@ -343,6 +345,24 @@ public class DeepSeekChatService {
             log.warn("[DeepSeek问答] 获取历史记录失败: {}", e.getMessage());
         }
         return result;
+    }
+
+    /**
+     * 记录一条**不经本类 chat()** 完成的问答（当前唯一调用方：Agent 成功分支）。
+     *
+     * 为什么需要这个入口：Agent 模式（app.ai.deepseek.agent.enabled=true）下
+     * /api/deepseek/chat 走的是 AgentOrchestrator，**完全不经过本类 chat()**，
+     * 而落库只发生在 chat() 内部 → Agent 的问答从不写 ai_chat_history，
+     * 前端刷新时 /api/deepseek/history（getHistory）恒返回空，
+     * 用户看到的现象就是"DeepSeek 问答不展示历史信息"。
+     * 这里把落库能力单独暴露出来，与 chat() 内部共用同一实现，
+     * 保证两条链路的 is_unknown / confidence 口径一致，历史回显不因走哪条链路而不同。
+     *
+     * 注意：降级分支已由 chat() 内部落库，调用方**不得**在降级时再调本方法，
+     * 否则同一条问答会在历史里出现两遍。
+     */
+    public void recordHistory(Long userId, String sessionId, String question, String answer, String ipAddress) {
+        saveHistory(userId, sessionId, question, answer, ipAddress);
     }
 
     /**

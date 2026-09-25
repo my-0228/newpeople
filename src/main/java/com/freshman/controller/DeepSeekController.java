@@ -140,7 +140,7 @@ public class DeepSeekController {
 
         try {
             if (agentProperties.isEnabled()) {
-                AgentChatResponse resp = runAgent(question, sessionId, userId);
+                AgentChatResponse resp = runAgent(question, sessionId, userId, getClientIp(httpRequest));
                 log.info("[DeepSeek API] Agent 问答完成: session={}, stopReason={}, steps={}",
                         sessionId, resp.getStopReason(),
                         resp.getSteps() == null ? 0 : resp.getSteps().size());
@@ -155,8 +155,12 @@ public class DeepSeekController {
         }
     }
 
-    /** 走 Agent 编排；降级时退回无工具 chat（复用现有配置引导与错误码分级） */
-    private AgentChatResponse runAgent(String question, String sessionId, Long userId) {
+    /**
+     * 走 Agent 编排；降级时退回无工具 chat（复用现有配置引导与错误码分级）。
+     *
+     * @param ipAddress 客户端IP，仅用于成功分支的历史落库（与旧链路 chat() 的落库字段对齐）
+     */
+    private AgentChatResponse runAgent(String question, String sessionId, Long userId, String ipAddress) {
         AgentAnswer answer = agentOrchestrator.run(question, sessionId, java.util.List.of());
         if (answer.isDegraded() || answer.getAnswer() == null) {
             ChatResponse fallback = deepSeekChatService.chat(question, sessionId, null, userId);
@@ -184,6 +188,11 @@ public class DeepSeekController {
         resp.setStopReason(answer.getStopReason());
         resp.setDegraded(false);
         resp.setCostMs(answer.getTotalMs());
+        // 落库：Agent 路径不经 DeepSeekChatService.chat()，而落库只发生在 chat() 内部 ——
+        // 不在这里补写，ai_chat_history 里就永远没有 Agent 的问答记录，
+        // 前端刷新时 /api/deepseek/history 恒返回空（"历史信息不展示"的根因）。
+        // 仅成功分支落库：上面的降级分支已由 chat() 内部写过一次，这里再写会让同一条问答出现两遍。
+        deepSeekChatService.recordHistory(userId, sessionId, question, answer.getAnswer(), ipAddress);
         return resp;
     }
 
